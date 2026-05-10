@@ -10,7 +10,7 @@ type TimeSlot = '08:30' | '10:00' | '11:30' | '14:00' | '16:30' | '18:00'
 type Weekday = 0 | 1 | 2 | 3 | 4 | 5 | 6
 type DayStatus = 'available' | 'full' | 'closed' | 'past' | 'outside'
 type BookingStep = 'selection' | 'review' | 'result'
-type SubmissionResult = 'success' | 'failure' | null
+type SubmissionResult = 'success' | 'failure' | 'canceled' | null
 
 type Appointment = {
   id: string
@@ -71,6 +71,7 @@ function App() {
   const [bookingDraft, setBookingDraft] = React.useState<BookingDraft>(initialDraft)
   const [bookingStep, setBookingStep] = React.useState<BookingStep>('selection')
   const [submissionResult, setSubmissionResult] = React.useState<SubmissionResult>(null)
+  const [confirmedAppointment, setConfirmedAppointment] = React.useState<Appointment | null>(null)
   const [visibleMonth, setVisibleMonth] = React.useState(() =>
     initialDraft.dateKey === null ? startOfMonth(new Date()) : startOfMonth(dateFromDateKey(initialDraft.dateKey)),
   )
@@ -84,13 +85,12 @@ function App() {
     [appointments, visibleMonth],
   )
   const selectedDate = bookingDraft.dateKey === null ? null : dateFromDateKey(bookingDraft.dateKey)
-  const selectedScheduledTimeSlots =
-    selectedDate === null ? [] : scheduledTimeSlotsForDate(selectedDate)
-  const selectedReservedTimeSlots =
-    selectedDate === null ? new Set<TimeSlot>() : reservedTimeSlotsForDate(selectedDate, appointments)
+  const selectedAvailableTimeSlots =
+    selectedDate === null ? [] : availableTimeSlotsForDate(selectedDate, appointments)
   const canContinue =
     bookingDraft.dateKey !== null &&
     bookingDraft.timeSlot !== null &&
+    selectedAvailableTimeSlots.includes(bookingDraft.timeSlot) &&
     isValidFullName(bookingDraft.fullName) &&
     isValidPhoneNumber(bookingDraft.phoneNumber)
 
@@ -130,6 +130,7 @@ function App() {
     const selectedTimeSlot = bookingDraft.timeSlot
 
     if (selectedDateKey === null || selectedTimeSlot === null) {
+      setConfirmedAppointment(null)
       setSubmissionResult('failure')
       setBookingStep('result')
       return
@@ -141,53 +142,55 @@ function App() {
 
     if (!slotIsAvailable) {
       setAppointments(latestAppointments)
+      setConfirmedAppointment(null)
       setSubmissionResult('failure')
       setBookingStep('result')
       return
     }
 
-    const nextAppointments = [
-      ...latestAppointments,
-      {
-        id: window.crypto.randomUUID(),
-        dateKey: selectedDateKey,
-        timeSlot: selectedTimeSlot,
-        fullName: bookingDraft.fullName.trim(),
-        phoneNumber: bookingDraft.phoneNumber.trim(),
-        createdAt: new Date().toISOString(),
-      },
-    ]
+    const appointment = {
+      id: window.crypto.randomUUID(),
+      dateKey: selectedDateKey,
+      timeSlot: selectedTimeSlot,
+      fullName: bookingDraft.fullName.trim(),
+      phoneNumber: bookingDraft.phoneNumber.trim(),
+      createdAt: new Date().toISOString(),
+    }
+    const nextAppointments = [...latestAppointments, appointment]
 
     saveStoredAppointments(nextAppointments)
     setAppointments(nextAppointments)
+    setConfirmedAppointment(appointment)
     setSubmissionResult('success')
     setBookingStep('result')
   }
 
-  function handleStartAnotherRequest() {
-    setBookingDraft(EMPTY_BOOKING_DRAFT)
-    setSubmissionResult(null)
-    setBookingStep('selection')
-    setVisibleMonth(startOfMonth(new Date()))
+  function handleCancelAppointment() {
+    if (confirmedAppointment === null) {
+      return
+    }
+
+    const nextAppointments = loadStoredAppointments().filter(
+      (appointment) => appointment.id !== confirmedAppointment.id,
+    )
+
+    saveStoredAppointments(nextAppointments)
+    setAppointments(nextAppointments)
+    setSubmissionResult('canceled')
     window.localStorage.removeItem(BOOKING_DRAFT_STORAGE_KEY)
   }
 
   return (
     <main className="min-h-svh bg-[#f5f7fb] px-4 py-6 text-slate-900 sm:px-6 lg:px-8">
       <section className="mx-auto flex w-full max-w-5xl flex-col gap-6">
-        <header className="flex flex-col gap-3 border-b border-slate-200 pb-5 sm:flex-row sm:items-end sm:justify-between">
+        <header className="border-b border-slate-200 pb-5">
           <div>
             <p className="text-sm font-semibold uppercase tracking-[0.12em] text-teal-700">
               Physiotherapy
             </p>
             <h1 className="mt-1 text-3xl font-semibold tracking-normal text-slate-950 sm:text-4xl">
-              Book a treatment appointment
+              Book an appointment
             </h1>
-          </div>
-
-          <div className="flex items-center gap-2 rounded-md border border-slate-200 bg-white px-3 py-2 text-sm text-slate-600 shadow-sm">
-            <span className="h-2.5 w-2.5 rounded-full bg-emerald-500" aria-hidden="true" />
-            Open booking link
           </div>
         </header>
 
@@ -202,8 +205,7 @@ function App() {
             onMonthChange={handleMonthChange}
             onTimeSlotToggle={handleTimeSlotToggle}
             selectedDate={selectedDate}
-            selectedReservedTimeSlots={selectedReservedTimeSlots}
-            selectedScheduledTimeSlots={selectedScheduledTimeSlots}
+            selectedAvailableTimeSlots={selectedAvailableTimeSlots}
             visibleMonth={visibleMonth}
           />
         )}
@@ -219,7 +221,7 @@ function App() {
         {bookingStep === 'result' && (
           <ResultScreen
             bookingDraft={bookingDraft}
-            onStartAnotherRequest={handleStartAnotherRequest}
+            onCancelAppointment={handleCancelAppointment}
             submissionResult={submissionResult}
           />
         )}
@@ -238,8 +240,7 @@ type BookingSelectionProps = {
   onMonthChange: (monthOffset: number) => void
   onTimeSlotToggle: (timeSlot: TimeSlot) => void
   selectedDate: Date | null
-  selectedReservedTimeSlots: ReadonlySet<TimeSlot>
-  selectedScheduledTimeSlots: readonly TimeSlot[]
+  selectedAvailableTimeSlots: readonly TimeSlot[]
   visibleMonth: Date
 }
 
@@ -253,8 +254,7 @@ function BookingSelection({
   onMonthChange,
   onTimeSlotToggle,
   selectedDate,
-  selectedReservedTimeSlots,
-  selectedScheduledTimeSlots,
+  selectedAvailableTimeSlots,
   visibleMonth,
 }: BookingSelectionProps) {
   const selectedDateLabel = selectedDate === null ? 'No date selected' : longDateFormatter.format(selectedDate)
@@ -290,8 +290,7 @@ function BookingSelection({
         <TimeSlotPicker
           bookingDraft={bookingDraft}
           onTimeSlotToggle={onTimeSlotToggle}
-          reservedTimeSlots={selectedReservedTimeSlots}
-          scheduledTimeSlots={selectedScheduledTimeSlots}
+          availableTimeSlots={selectedAvailableTimeSlots}
           selectedDate={selectedDate}
         />
 
@@ -307,7 +306,7 @@ function BookingSelection({
             onClick={onContinue}
           >
             Continue
-            <Lucide.Check className="h-4 w-4" aria-hidden="true" />
+            {canContinue && <Lucide.Check className="h-4 w-4" aria-hidden="true" />}
           </button>
         </div>
       </section>
@@ -426,39 +425,35 @@ function CalendarDateButton({ calendarDay, isSelected, onDateToggle }: CalendarD
 }
 
 type TimeSlotPickerProps = {
+  availableTimeSlots: readonly TimeSlot[]
   bookingDraft: BookingDraft
   onTimeSlotToggle: (timeSlot: TimeSlot) => void
-  reservedTimeSlots: ReadonlySet<TimeSlot>
-  scheduledTimeSlots: readonly TimeSlot[]
   selectedDate: Date | null
 }
 
 function TimeSlotPicker({
+  availableTimeSlots,
   bookingDraft,
   onTimeSlotToggle,
-  reservedTimeSlots,
-  scheduledTimeSlots,
   selectedDate,
 }: TimeSlotPickerProps) {
   if (selectedDate === null) {
     return <EmptyState label="No date selected" />
   }
 
-  if (scheduledTimeSlots.length === 0) {
-    return <EmptyState label="No treatment hours on this date" />
+  if (availableTimeSlots.length === 0) {
+    return <EmptyState label="No available times on this date" />
   }
 
   return (
     <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-6">
-      {scheduledTimeSlots.map((timeSlot) => {
-        const isReserved = reservedTimeSlots.has(timeSlot)
+      {availableTimeSlots.map((timeSlot) => {
         const isSelected = bookingDraft.timeSlot === timeSlot
         const className = [
           'flex min-h-16 flex-col items-center justify-center rounded-md border px-3 py-2 text-sm font-semibold transition',
           isSelected
             ? 'border-blue-700 bg-blue-700 text-white shadow-sm'
             : 'border-slate-200 bg-slate-50 text-slate-900 hover:border-blue-300 hover:bg-blue-50',
-          isReserved ? 'cursor-not-allowed border-rose-200 bg-rose-50 text-rose-700 hover:border-rose-200 hover:bg-rose-50' : '',
         ].join(' ')
 
         return (
@@ -466,12 +461,11 @@ function TimeSlotPicker({
             type="button"
             aria-pressed={isSelected}
             className={className}
-            disabled={isReserved}
             key={timeSlot}
             onClick={() => onTimeSlotToggle(timeSlot)}
           >
             <span>{timeSlot}</span>
-            <span className="text-xs font-medium opacity-75">{isReserved ? 'Booked' : 'Available'}</span>
+            <span className="text-xs font-medium opacity-75">Available</span>
           </button>
         )
       })}
@@ -497,6 +491,14 @@ type ContactFieldsProps = {
 }
 
 function ContactFields({ bookingDraft, onDraftFieldChange }: ContactFieldsProps) {
+  const phoneNumberHasInvalidCharacters = hasNonNumericalInput(bookingDraft.phoneNumber)
+  const phoneInputClassName = [
+    'h-12 w-full rounded-md border bg-white py-2 pl-10 pr-3 text-base font-medium outline-none transition placeholder:text-slate-400',
+    phoneNumberHasInvalidCharacters
+      ? 'border-rose-400 text-rose-700 focus:border-rose-500 focus:ring-4 focus:ring-rose-100'
+      : 'border-slate-300 text-slate-950 focus:border-blue-600 focus:ring-4 focus:ring-blue-100',
+  ].join(' ')
+
   return (
     <div className="grid gap-3 border-t border-slate-200 pt-4 sm:grid-cols-2">
       <label className="grid gap-2 text-sm font-semibold text-slate-700">
@@ -521,12 +523,21 @@ function ContactFields({ bookingDraft, onDraftFieldChange }: ContactFieldsProps)
           <input
             type="tel"
             autoComplete="tel"
-            className="h-12 w-full rounded-md border border-slate-300 bg-white py-2 pl-10 pr-3 text-base font-medium text-slate-950 outline-none transition placeholder:text-slate-400 focus:border-blue-600 focus:ring-4 focus:ring-blue-100"
+            inputMode="numeric"
+            pattern="[0-9]*"
+            aria-invalid={phoneNumberHasInvalidCharacters}
+            aria-describedby={phoneNumberHasInvalidCharacters ? 'phone-number-error' : undefined}
+            className={phoneInputClassName}
             placeholder="Phone number"
             value={bookingDraft.phoneNumber}
             onChange={(event) => onDraftFieldChange('phoneNumber', event.target.value)}
           />
         </span>
+        {phoneNumberHasInvalidCharacters && (
+          <span className="text-sm font-medium text-rose-700" id="phone-number-error">
+            Only numerical input is allowed.
+          </span>
+        )}
       </label>
     </div>
   )
@@ -549,7 +560,7 @@ function ReviewScreen({ bookingDraft, onBack, onSubmit }: ReviewScreenProps) {
         <h2 className="mt-1 text-2xl font-semibold tracking-normal text-slate-950">{selectedDateLabel}</h2>
       </div>
 
-      <dl className="grid gap-3 sm:grid-cols-2">
+      <dl className="grid gap-3">
         <DetailItem label="Time" value={bookingDraft.timeSlot ?? 'No time selected'} />
         <DetailItem label="Full name" value={bookingDraft.fullName.trim()} />
         <DetailItem label="Phone number" value={bookingDraft.phoneNumber.trim()} />
@@ -567,11 +578,10 @@ function ReviewScreen({ bookingDraft, onBack, onSubmit }: ReviewScreenProps) {
 
         <button
           type="button"
-          className="inline-flex items-center justify-center gap-2 rounded-md bg-slate-950 px-5 py-3 text-sm font-semibold text-white shadow-sm transition hover:bg-slate-800"
+          className="inline-flex items-center justify-center rounded-md bg-slate-950 px-5 py-3 text-sm font-semibold text-white shadow-sm transition hover:bg-slate-800"
           onClick={onSubmit}
         >
-          Submit request
-          <Lucide.Check className="h-4 w-4" aria-hidden="true" />
+          Book it
         </button>
       </div>
     </section>
@@ -594,12 +604,13 @@ function DetailItem({ label, value }: DetailItemProps) {
 
 type ResultScreenProps = {
   bookingDraft: BookingDraft
-  onStartAnotherRequest: () => void
+  onCancelAppointment: () => void
   submissionResult: SubmissionResult
 }
 
-function ResultScreen({ bookingDraft, onStartAnotherRequest, submissionResult }: ResultScreenProps) {
+function ResultScreen({ bookingDraft, onCancelAppointment, submissionResult }: ResultScreenProps) {
   const isSuccess = submissionResult === 'success'
+  const isCanceled = submissionResult === 'canceled'
   const selectedDateLabel =
     bookingDraft.dateKey === null ? 'No date selected' : longDateFormatter.format(dateFromDateKey(bookingDraft.dateKey))
 
@@ -616,22 +627,24 @@ function ResultScreen({ bookingDraft, onStartAnotherRequest, submissionResult }:
 
       <div>
         <p className="text-sm font-semibold uppercase tracking-[0.12em] text-slate-500">
-          {isSuccess ? 'Appointment saved' : 'Appointment unavailable'}
+          {isSuccess ? 'Appointment saved' : isCanceled ? 'Appointment canceled' : 'Appointment unavailable'}
         </p>
         <h2 className="mt-1 text-2xl font-semibold tracking-normal text-slate-950">{selectedDateLabel}</h2>
-        <p className="mt-2 text-base font-medium text-slate-600">
-          {bookingDraft.timeSlot ?? 'No time selected'} · {bookingDraft.fullName.trim()}
+        <p className="mt-1 text-2xl font-semibold tracking-normal text-slate-950">
+          {bookingDraft.timeSlot ?? 'No time selected'}
         </p>
+        <p className="mt-3 text-base font-medium text-slate-600">{bookingDraft.fullName.trim()}</p>
       </div>
 
-      <button
-        type="button"
-        className="inline-flex items-center justify-center gap-2 rounded-md border border-slate-300 bg-white px-5 py-3 text-sm font-semibold text-slate-700 transition hover:bg-slate-50"
-        onClick={onStartAnotherRequest}
-      >
-        <Lucide.RotateCcw className="h-4 w-4" aria-hidden="true" />
-        New request
-      </button>
+      {isSuccess && (
+        <button
+          type="button"
+          className="inline-flex items-center justify-center rounded-md border border-rose-200 bg-white px-5 py-3 text-sm font-semibold text-rose-700 transition hover:bg-rose-50"
+          onClick={onCancelAppointment}
+        >
+          Cancel appointment
+        </button>
+      )}
     </section>
   )
 }
@@ -796,7 +809,11 @@ function isValidFullName(fullName: string): boolean {
 }
 
 function isValidPhoneNumber(phoneNumber: string): boolean {
-  return phoneNumber.replace(/\D/g, '').length >= 7
+  return /^\d{7,}$/.test(phoneNumber.trim())
+}
+
+function hasNonNumericalInput(phoneNumber: string): boolean {
+  return /\D/.test(phoneNumber.trim())
 }
 
 function loadStoredAppointments(): Appointment[] {
